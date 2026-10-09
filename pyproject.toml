@@ -1,0 +1,18 @@
+[project]
+name = "paper-writing-agent"
+version = "0.1.0"
+description = "Local research and paper-writing workspace"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "python-dotenv",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
