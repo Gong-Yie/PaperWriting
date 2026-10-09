@@ -1,4 +1,4 @@
-"""DeepSeek-compatible JSON completions and rate-limited arXiv search."""
+"""Responses API JSON output and rate-limited arXiv search."""
 
 import asyncio
 import json
@@ -50,17 +50,20 @@ class ModelMessage(TypedDict):
     content: str
 
 
-class CompletionMessage(BaseModel):
-    content: str | None
+class ResponseContentPart(BaseModel):
+    type: str
+    text: str | None = None
 
 
-class CompletionChoice(BaseModel):
-    finish_reason: str
-    message: CompletionMessage
+class ResponseOutputItem(BaseModel):
+    type: str
+    role: str | None = None
+    content: list[ResponseContentPart] = Field(default_factory=list)
 
 
-class CompletionResponse(BaseModel):
-    choices: list[CompletionChoice] = Field(min_length=1)
+class ModelResponse(BaseModel):
+    status: str
+    output: list[ResponseOutputItem]
 
 
 class ModelClient:
@@ -78,13 +81,14 @@ class ModelClient:
         }
         try:
             response = await self.client.post(
-                f"{self.settings.base_url.rstrip('/')}/chat/completions",
+                f"{self.settings.base_url.rstrip('/')}/responses",
                 headers={"Authorization": f"Bearer {self.settings.api_key}"},
                 json={
                     "model": self.settings.model,
-                    "messages": [schema_message, *messages],
-                    "response_format": {"type": "json_object"},
-                    "max_tokens": 4096,
+                    "input": [schema_message, *messages],
+                    "text": {"format": {"type": "json_object"}},
+                    "max_output_tokens": 4096,
+                    "store": False,
                 },
             )
             response.raise_for_status()
@@ -95,11 +99,24 @@ class ModelClient:
         except httpx.RequestError as exc:
             raise ExternalServiceError("模型请求未完成，请检查网络后重新发送。") from exc
         try:
-            completion = CompletionResponse.model_validate_json(response.content)
-            choice = completion.choices[0]
-            if choice.finish_reason != "stop" or not choice.message.content:
+            result = ModelResponse.model_validate_json(response.content)
+            if result.status == "failed":
+                raise ExternalServiceError("模型服务未能完成请求，请检查服务状态。")
+            if result.status != "completed":
                 raise ExternalServiceError("模型回复未完整生成，请重新发送或缩小问题范围。")
-            return result_type.model_validate_json(choice.message.content)
+            text_parts: list[str] = []
+            for item in result.output:
+                if item.type != "message" or item.role != "assistant":
+                    continue
+                for part in item.content:
+                    if part.type == "refusal":
+                        raise ExternalServiceError("模型拒绝了该请求，请调整研究问题。")
+                    if part.type == "output_text" and part.text is not None:
+                        text_parts.append(part.text)
+            output_text = "".join(text_parts)
+            if not output_text:
+                raise ExternalServiceError("模型没有返回文本结果，请重新发送。")
+            return result_type.model_validate_json(output_text)
         except ValidationError as exc:
             raise ExternalServiceError("模型回复不符合选题档案结构，请重新发送。") from exc
 

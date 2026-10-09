@@ -38,12 +38,22 @@ def draft() -> TopicDraft:
     )
 
 
-def completion(payload: str, finish_reason: str = "stop") -> httpx.Response:
+def model_response(payload: str, status: str = "completed") -> httpx.Response:
+    midpoint = len(payload) // 2
     return httpx.Response(
         200,
         json={
-            "choices": [
-                {"message": {"content": payload}, "finish_reason": finish_reason}
+            "status": status,
+            "output": [
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": payload[:midpoint]},
+                        {"type": "output_text", "text": payload[midpoint:]},
+                    ],
+                },
             ]
         },
     )
@@ -61,11 +71,16 @@ def test_discuss_confirm_configure_and_reload_complete_archive(
             assert request.url.params["search_query"] == 'all:"small models"'
             return httpx.Response(200, text=ATOM_FEED)
         payload = json.loads(request.content)
+        assert request.url.path == "/responses"
         assert request.headers["Authorization"] == "Bearer fake-test-key"
+        assert payload["text"]["format"] == {"type": "json_object"}
+        assert payload["max_output_tokens"] == 4096
+        assert payload["store"] is False
+        assert not {"messages", "response_format", "max_tokens"}.intersection(payload)
         if len(requests) == 1:
-            return completion(json.dumps({"query": 'all:"small models"'}))
-        assert "2601.00001v1" in payload["messages"][1]["content"]
-        return completion(
+            return model_response(json.dumps({"query": 'all:"small models"'}))
+        assert "2601.00001v1" in payload["input"][1]["content"]
+        return model_response(
             json.dumps(
                 {
                     "reply": "结合 arXiv:2601.00001v1，建议进一步验证该研究问题。",
@@ -139,8 +154,8 @@ def test_no_results_and_followup_clear_outdated_draft(
             return httpx.Response(200, text=EMPTY_FEED)
         model_calls += 1
         if model_calls % 2:
-            return completion('{"query":"all:example"}')
-        return completion(
+            return model_response('{"query":"all:example"}')
+        return model_response(
             json.dumps(
                 {
                     "reply": "暂无检索结果，请补充研究要求。",
@@ -174,6 +189,10 @@ def test_no_results_and_followup_clear_outdated_draft(
         ("model_timeout", "模型请求未完成"),
         ("model_json", "模型回复不符合"),
         ("model_truncated", "模型回复未完整生成"),
+        ("model_failed", "模型服务未能完成请求"),
+        ("model_empty", "模型没有返回文本结果"),
+        ("model_refusal", "模型拒绝了该请求"),
+        ("legacy_chat", "模型回复不符合"),
         ("arxiv_http", "arXiv 检索返回 HTTP 503"),
         ("arxiv_xml", "arXiv 返回了无法解析"),
     ],
@@ -195,10 +214,40 @@ def test_upstream_failure_is_explicit_and_does_not_save_fake_results(
         if failure == "model_timeout":
             raise httpx.ReadTimeout("test timeout", request=request)
         if failure == "model_json":
-            return completion("not JSON")
+            return model_response("not JSON")
         if failure == "model_truncated":
-            return completion('{"query":"example"}', finish_reason="length")
-        return completion('{"query":"all:example"}')
+            return model_response('{"query":"example"}', status="incomplete")
+        if failure == "model_failed":
+            return model_response("", status="failed")
+        if failure == "model_empty":
+            return httpx.Response(200, json={"status": "completed", "output": []})
+        if failure == "model_refusal":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "refusal", "refusal": "denied"}],
+                        }
+                    ],
+                },
+            )
+        if failure == "legacy_chat":
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": '{"query":"all:example"}'},
+                        }
+                    ]
+                },
+            )
+        return model_response('{"query":"all:example"}')
 
     with TestClient(
         create_app(SETTINGS, tmp_path, httpx.MockTransport(handle))
